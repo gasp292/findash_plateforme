@@ -178,6 +178,21 @@ ASSET_DB: dict[str, str] = {
 ASSET_LABELS = [""] + sorted(ASSET_DB.keys())
 
 # ─────────────────────────────────────────────────────────────────────────────
+# EXTENDED TICKER DATABASE  (~1700 tickers from tickers_db.py)
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional: extend ASSET_DB with the bundled global tickers database.
+# If tickers_db.py is missing or fails to import, the curated list above
+# remains available — the app stays functional with reduced coverage.
+try:
+    from tickers_db import EXTENDED_ASSETS
+    ASSET_DB.update(EXTENDED_ASSETS)
+    ASSET_LABELS = [""] + sorted(ASSET_DB.keys())
+except Exception as _e:
+    # Non-blocking: log to stderr but keep the app running
+    import sys
+    print(f"[WARN] Could not load tickers_db.py: {_e}", file=sys.stderr)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PERSISTENCE — Watchlist on disk (CSV)
 # ─────────────────────────────────────────────────────────────────────────────
 WATCHLIST_DIR = Path("user_data")
@@ -187,13 +202,27 @@ WATCHLIST_FILE = WATCHLIST_DIR / "watchlist.csv"
 def load_watchlist() -> list[str]:
     """
     Read saved asset labels from CSV. Returns empty list on missing/corrupt file.
-    Filters out any labels that no longer exist in ASSET_DB (asset retired).
+
+    For labels NOT in ASSET_DB (e.g. user-added custom tickers), the ticker is
+    parsed from the trailing parentheses: "Custom (NVDA)" -> ticker "NVDA",
+    and the entry is injected into the runtime ASSET_DB so the rest of the app
+    can look it up normally.
     """
     try:
         if WATCHLIST_FILE.exists():
             with WATCHLIST_FILE.open("r", encoding="utf-8") as f:
                 lines = [line.strip() for line in f if line.strip()]
-                return [lbl for lbl in lines if lbl in ASSET_DB]
+                valid: list[str] = []
+                for lbl in lines:
+                    if lbl in ASSET_DB:
+                        valid.append(lbl)
+                    elif lbl.endswith(")") and "(" in lbl:
+                        # Custom label — extract ticker between the last parentheses
+                        ticker = lbl[lbl.rfind("(") + 1 : lbl.rfind(")")].strip()
+                        if ticker:
+                            ASSET_DB[lbl] = ticker        # inject at runtime
+                            valid.append(lbl)
+                return valid
     except Exception:
         pass
     return []
@@ -217,6 +246,8 @@ if "selected_assets" not in st.session_state:
     st.session_state.selected_assets: list[str] = load_watchlist()
 if "selectbox_key" not in st.session_state:
     st.session_state.selectbox_key = 0                 # used to reset the selectbox
+if "custom_key" not in st.session_state:
+    st.session_state.custom_key = 0                    # used to reset the custom-ticker input
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA FETCHING  (cached)
@@ -465,6 +496,25 @@ with st.sidebar:
         save_watchlist(st.session_state.selected_assets)   # persist
         st.session_state.selectbox_key += 1   # reset widget to blank
         st.rerun()
+
+    # ── Free-text custom ticker (escape hatch for anything not in the DB) ─────
+    st.markdown("**Or type any Yahoo Finance ticker**")
+    custom_input = st.text_input(
+        "Custom ticker",
+        placeholder="e.g. NVDA · ^GSPC · BTC-USD · RNO.PA",
+        label_visibility="collapsed",
+        key=f"custom_ticker_{st.session_state.custom_key}",
+        help="Any valid Yahoo Finance symbol. Press Enter to add.",
+    )
+    if custom_input:
+        ticker_clean = custom_input.strip().upper()
+        custom_label = f"Custom ({ticker_clean})"
+        if custom_label not in st.session_state.selected_assets:
+            ASSET_DB[custom_label] = ticker_clean   # inject at runtime
+            st.session_state.selected_assets.append(custom_label)
+            save_watchlist(st.session_state.selected_assets)
+            st.session_state.custom_key += 1
+            st.rerun()
 
     st.divider()
 
