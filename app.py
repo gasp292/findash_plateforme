@@ -225,8 +225,16 @@ if "selectbox_key" not in st.session_state:
 def fetch_history(ticker: str) -> pd.DataFrame | None:
     """
     Download 10 years of daily OHLCV data from Yahoo Finance.
-    Returns a DataFrame indexed by Date with columns: Open, High, Low, Close, Volume.
+    Returns a DataFrame indexed by Date (tz-naive) with columns:
+      Open, High, Low, Close, Volume.
     Returns None if data is unavailable or insufficient.
+
+    Defensive normalisations applied (essential for Streamlit Cloud where
+    yfinance / pandas versions may differ from local):
+      - flatten MultiIndex columns
+      - strip timezone from index (prevents concat misalignment across exchanges)
+      - force numeric dtype on OHLCV (prevents object-dtype edge cases)
+      - drop rows with NaN Close
     """
     end   = date.today()
     start = end - timedelta(days=365 * 10 + 3)          # +3 days buffer for weekends
@@ -240,10 +248,26 @@ def fetch_history(ticker: str) -> pd.DataFrame | None:
         )
         if df is None or df.empty or len(df) < 30:
             return None
-        # Flatten multi-level columns if present (yfinance ≥ 0.2.x)
+
+        # Flatten multi-level columns (yfinance ≥ 0.2.x returns these even for one ticker)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+
+        # Convert index to tz-naive datetime — critical for cross-exchange alignment
         df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
+        # Force numeric on OHLCV (some yfinance versions return object dtype)
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Drop rows with missing Close (essential for downstream calcs)
+        df = df.dropna(subset=["Close"])
+        if len(df) < 30:
+            return None
+
         return df[["Open", "High", "Low", "Close", "Volume"]]
     except Exception:
         return None
@@ -587,15 +611,34 @@ st.caption("All assets rebased to 100 on day 1 of the window, enabling direct vi
 normed_frames = []
 for label, df in data_map.items():
     close = df["Close"].dropna()
+    if close.empty or close.iloc[0] == 0:
+        continue
     normed = (close / close.iloc[0]) * 100
     normed.name = label
     normed_frames.append(normed)
 
 if normed_frames:
     chart_df = pd.concat(normed_frames, axis=1).ffill()
+    # Strip tz again defensively (concat can re-introduce it from individual series)
+    chart_df.index = pd.to_datetime(chart_df.index)
+    if chart_df.index.tz is not None:
+        chart_df.index = chart_df.index.tz_localize(None)
     # Resample to weekly to keep the chart readable
-    chart_df_weekly = chart_df.resample("W").last()
-    st.line_chart(chart_df_weekly, use_container_width=True, height=380)
+    chart_df_weekly = chart_df.resample("W").last().dropna(how="all")
+
+    if chart_df_weekly.empty or chart_df_weekly.isna().all().all():
+        st.warning("⚠️ Chart data is empty after processing. Open the debug panel below.")
+        with st.expander("🐛 Debug — raw chart data shape"):
+            st.write(f"chart_df shape: {chart_df.shape}")
+            st.write(f"chart_df_weekly shape: {chart_df_weekly.shape}")
+            st.write("chart_df head:")
+            st.write(chart_df.head())
+            st.write("chart_df_weekly head:")
+            st.write(chart_df_weekly.head())
+    else:
+        st.line_chart(chart_df_weekly, use_container_width=True, height=380)
+else:
+    st.warning("⚠️ No assets with valid data for normalisation.")
 
 st.divider()
 
@@ -653,8 +696,19 @@ for tab, (label, df) in zip(tabs, data_map.items()):
 
         # ── Sparkline for this asset ─────────────────────────────────────────
         st.caption(f"📈 Closing price history — {label}")
-        close_series = df["Close"].dropna().resample("W").last().to_frame()
-        st.line_chart(close_series, use_container_width=True, height=200)
+        close_series = df["Close"].dropna()
+        if not close_series.empty:
+            # Strip tz before resample (defensive)
+            close_series.index = pd.to_datetime(close_series.index)
+            if close_series.index.tz is not None:
+                close_series.index = close_series.index.tz_localize(None)
+            weekly = close_series.resample("W").last().dropna().to_frame()
+            if not weekly.empty:
+                st.line_chart(weekly, use_container_width=True, height=200)
+            else:
+                st.caption("_(no data to plot)_")
+        else:
+            st.caption("_(no data to plot)_")
 
 st.divider()
 

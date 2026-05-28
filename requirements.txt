@@ -1,4 +1,10 @@
-streamlit>=1.30.0
-yfinance>=0.2.36
-pandas>=2.0.0
-numpy>=1.24.0
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements.txt — FinDash v1.2
+# Pinned versions to align local ↔ Streamlit Cloud behaviour
+# (fixes chart rendering bugs caused by version drift in yfinance / pandas)
+# ─────────────────────────────────────────────────────────────────────────────
+
+streamlit>=1.35.0,<1.50.0
+yfinance>=0.2.40,<0.3.0
+pandas>=2.2.0,<3.0.0
+numpy>=1.26.0,<2.0.0
